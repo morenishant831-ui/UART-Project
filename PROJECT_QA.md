@@ -1,6 +1,9 @@
 # UART Project — Deep Q&A (Viva / Interview Prep)
+NOTICE: 
+I will be trying to type of my own , and in this file there, will be almost no AI generated, content , unlike other files where, there is a bit of AI, written code . 
 
-Use these questions to explain the design clearly and confidently. Answers are written to match the modules and signals in this repo.
+Here, I am trying to document all the doubts, that I had with answers, as well , so i can refer back , and reflect upon my learning . 
+
 
 ---
 

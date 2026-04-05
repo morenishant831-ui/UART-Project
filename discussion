@@ -1,0 +1,233 @@
+Yes — in that FSM, **DATA usually means only the payload bits of the current UART frame**, not the whole message or packet. A UART frame consists of a **Start bit**, then **7/8/9 data bits** depending on configuration, optionally parity, and then **1 or more Stop bits**. Microchip’s UART documentation states exactly that framing, and notes that 8N1 is the common case. ([Microchip][1])
+
+So in your diagram:
+
+* **IDLE**: line is waiting
+* **START**: send the start bit (`0`)
+* **DATA**: send the configured data bits of **one word/character**
+* **STOP**: send stop bit (`1`), then either go idle or start next word
+
+That means **DATA is not “the whole data buffer”**. It is only the bits of the **current word loaded into the UART transmitter**. UART hardware typically has a transmit buffer/register and a transmit shift register; the word is loaded there and then shifted out serially, one bit at a time. Microchip describes the transmitter this way: the transmit shift register gets its data from the transmit buffer, and the shift register is what actually sends the bits out. ([Microchip][2])
+
+### Why your counter says `counter == 7`
+
+That strongly suggests the designer assumed **8-bit data width**.
+
+Because for an 8-bit word:
+
+* bit index 0
+* bit index 1
+* ...
+* bit index 7
+
+After bit 7 is sent, the payload bits are done, so the FSM leaves **DATA** and goes to **STOP**. So here, the DATA state lasts for **8 baud intervals**, one per payload bit. This matches the common UART 8-bit frame format described in vendor docs. ([Microchip][1])
+
+### What actually gets shifted in DATA state
+
+Suppose the byte to send is:
+
+[
+\texttt{8'b10110010}
+]
+
+If UART is configured LSB first, it sends:
+
+[
+0,\ 1,\ 0,\ 0,\ 1,\ 1,\ 0,\ 1
+]
+
+one bit per baud interval, inside the **DATA** state. Microchip explicitly notes UART transmits the **least significant bit first**. ([Microchip][3])
+
+### Important distinction
+
+There are two different meanings of “data” here:
+
+1. **Application/message data**
+   Example: `"HELLO"` or a packet of 20 bytes
+
+2. **UART frame data field**
+   Example: just one byte such as `0x48`
+
+The UART transmitter does **not** send the whole message in one DATA state. It sends **one frame at a time**. So for `"HELLO"` in 8N1 mode, the FSM would typically repeat:
+
+* START → DATA(8 bits) → STOP
+* START → DATA(8 bits) → STOP
+* START → DATA(8 bits) → STOP
+* ...
+
+once for each byte. UART implementations commonly use a holding/buffer register plus a shift register, so while one character is being shifted out, the next one may wait in the buffer. ([Microchip][1])
+
+### So for your exact question
+
+Yes — **“DATA” is just the data field of a certain configured width**, usually 8 bits in beginner UART FSMs. It is **not the entire higher-level data stream**. The whole stream is sent as **many UART frames**, one after another. ([Microchip][1])
+
+### In your diagram specifically
+
+Because it says:
+
+[
+\text{counter} == 7
+]
+
+it almost certainly means:
+
+* current data width = **8 bits**
+* counter increments once per baud tick in DATA state
+* after 8 payload bits are shifted out, go to STOP
+
+So your interpretation is correct.
+
+### Revision takeaway
+
+* **DATA state** = payload bits of **one UART word/frame**
+* **counter == 7** = likely **8-bit transmission**
+* **not whole packet/message**
+* multiple bytes/messages require repeating the frame sequence
+
+If you want, I can redraw your FSM in a cleaner RTL-style form and map each state to `tx`, `bit_counter`, and `shift_reg`.
+
+[1]: https://ww1.microchip.com/downloads/aemDocuments/documents/OTH/ProductDocuments/ReferenceManuals/60001107H.pdf?utm_source=chatgpt.com "Section 21. UART"
+[2]: https://ww1.microchip.com/downloads/en/DeviceDoc/70066b.pdf?utm_source=chatgpt.com "Section 19. UART"
+[3]: https://ww1.microchip.com/downloads/en/DeviceDoc/61107E.pdf?utm_source=chatgpt.com "Section 21. UART"
+
+---
+
+## More UART Q&A
+
+### Q: What is `tx_clock_enable` used for in `uart_top.v`? Am I giving it a value in the testbench?
+
+**A:** `tx_clock_enable` is an internal wire in `uart_top`. It is not driven directly by the testbench.
+
+In `uart_top.v`:
+
+```verilog
+baud_rate_generator brg (
+    .clk(clk),
+    .reset(reset),
+    .tx_enable(tx_clock_enable),
+    .rx_en(rx_en)
+);
+```
+
+This means the `baud_rate_generator` instance drives `tx_clock_enable`.
+
+Then that signal is passed into the transmitter:
+
+```verilog
+uart_sender tx_inst (
+    .clk(clk),
+    .rst(reset),
+    .wr_en(tx_start),
+    .tx_en(tx_clock_enable),
+    .data_in(tx_fifo_dout),
+    .tx(tx_line),
+    .busy(tx_busy)
+);
+```
+
+So:
+
+- the testbench gives the top-level `clk`
+- the baud-rate generator uses that clock
+- it produces `tx_clock_enable`
+- the transmitter uses `tx_clock_enable` as its baud-timing pulse
+
+So you are **not** directly assigning a value to `tx_clock_enable` in the TB. The TB provides the source clock, and the design generates `tx_clock_enable` internally.
+
+### Q: Why is it called `tx_clock_enable` and not just `tx_en`?
+
+**A:** The name `tx_clock_enable` is more descriptive at the top level.
+
+It tells you:
+
+- this signal belongs to the TX path
+- it is a **clock-enable style pulse**
+- it comes from timing generation, not from user control
+
+If it were named only `tx_en`, that could sound like:
+
+- "enable the whole transmitter"
+- "turn TX on/off"
+
+But `tx_clock_enable` makes it clearer that this is the pulse that allows the TX FSM to advance one UART bit at the correct baud timing.
+
+Inside `uart_sender`, the port is named `tx_en` because that module uses a shorter local name:
+
+```verilog
+.tx_en(tx_clock_enable)
+```
+
+So both names refer to the same signal, but the top-level name is more explicit.
+
+### Q: Is `tx_clock_enable` what lets the transmitter move from `START` to `DATA`?
+
+**A:** Yes.
+
+The transmitter uses `tx_en` as the timing pulse that allows the FSM to move between UART transmission phases.
+
+In `uart_sender.v`:
+
+- `START -> DATA` happens only when `tx_en` is high
+- each data bit is sent only when `tx_en` is high
+- `STOP -> IDLE` happens only when `tx_en` is high
+
+So `wr_en` says:
+
+"A byte is available, begin transmission."
+
+And `tx_en` says:
+
+"This is the baud tick, advance one transmission step now."
+
+### Q: In a module instantiation like this, do the things inside the brackets get filled from the DUT?
+
+```verilog
+baud_rate_generator brg (
+    .clk(clk),
+    .reset(reset),
+    .tx_enable(tx_clock_enable),
+    .rx_en(rx_en)
+);
+```
+
+**A:** More precisely, the ports of the instantiated module are connected to signals in the **parent module**.
+
+Rule:
+
+- left side = port of the instantiated module
+- right side = signal in the parent module
+
+Here, the parent module is `uart_top`.
+
+So:
+
+- `.clk(clk)` means `brg.clk` is connected to `uart_top.clk`
+- `.reset(reset)` means `brg.reset` is connected to `uart_top.reset`
+- `.tx_enable(tx_clock_enable)` means `brg.tx_enable` drives `uart_top.tx_clock_enable`
+- `.rx_en(rx_en)` means `brg.rx_en` drives `uart_top.rx_en`
+
+Since `uart_top` itself is the DUT in the testbench, some of those parent signals are ultimately driven by the TB, but the connection shown here is between `brg` and `uart_top`.
+
+### Q: So will the connected signal hold the output of the instance?
+
+**A:** Yes, for output ports that is correct.
+
+In the `brg` instance:
+
+- `tx_enable` is an output port of `brg`
+- `rx_en` is an output port of `brg`
+
+So:
+
+- `brg.tx_enable` drives `uart_top.tx_clock_enable`
+- `brg.rx_en` drives `uart_top.rx_en`
+
+But for input ports, the direction is the opposite:
+
+- `uart_top.clk` is supplied into `brg.clk`
+- `uart_top.reset` is supplied into `brg.reset`
+
+So the correct general statement is:
+
+- if the instantiated port is an **output**, the connected parent signal carries that output value
+- if the instantiated port is an **input**, the parent signal provides the input value

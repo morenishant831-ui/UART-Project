@@ -9,9 +9,10 @@ module uart_receiver (
     output reg rdy,
     output reg [7:0] data_out
 );
-    parameter [1:0] START = 2'b00;
-    parameter [1:0] DATAOUT = 2'b01;
-    parameter [1:0] STOP = 2'b10;
+    parameter [1:0] IDLE  = 2'b00;
+    parameter [1:0] START = 2'b01;
+    parameter [1:0] DATA  = 2'b10;
+    parameter [1:0] STOP  = 2'b11;
 
     reg [1:0] state;
     reg [3:0] sample;
@@ -20,7 +21,7 @@ module uart_receiver (
 
     always @(posedge clk) begin
         if (rst) begin
-            state <= START;
+            state <= IDLE;
             sample <= 4'd0;
             index <= 4'd0;
             temp <= 8'd0;
@@ -33,46 +34,60 @@ module uart_receiver (
 
             if (rx_en) begin
                 case (state)
-                    START: begin
+                    IDLE: begin
+                        sample <= 4'd0;
+                        index <= 4'd0;
                         if (rx == 1'b0) begin
-                            sample <= sample + 4'd1;
-                            if (sample == 4'd15) begin
-                                sample <= 4'd0;
-                                index <= 4'd0;
-                                temp <= 8'd0;
-                                state <= DATAOUT;
-                            end
-                        end else begin
-                            sample <= 4'd0;
+                            state <= START;
                         end
                     end
 
-                    DATAOUT: begin
+                    START: begin
                         sample <= sample + 4'd1;
 
+                        // Validate the start bit at the middle of the bit period.
                         if (sample == 4'd7) begin
-                            temp[index[2:0]] <= rx;
-                            index <= index + 4'd1;
+                            if (rx == 1'b0) begin
+                                sample <= 4'd0;
+                                index <= 4'd0;
+                                temp <= 8'd0;
+                                state <= DATA;
+                            end else begin
+                                sample <= 4'd0;
+                                state <= IDLE;
+                            end
                         end
+                    end
 
-                        if ((index == 4'd8) && (sample == 4'd15)) begin
+                    DATA: begin
+                        sample <= sample + 4'd1;
+
+                        // After start-bit alignment, sample each data bit once per bit period.
+                        if (sample == 4'd15) begin
                             sample <= 4'd0;
-                            state <= STOP;
+                            temp[index[2:0]] <= rx;
+                            if (index == 4'd7) begin
+                                state <= STOP;
+                            end else begin
+                                index <= index + 4'd1;
+                            end
                         end
                     end
 
                     STOP: begin
                         sample <= sample + 4'd1;
                         if (sample == 4'd15) begin
-                            state <= START;
                             sample <= 4'd0;
-                            data_out <= temp;
-                            rdy <= 1'b1;
+                            state <= IDLE;
+                            if (rx == 1'b1) begin
+                                data_out <= temp;
+                                rdy <= 1'b1;
+                            end
                         end
                     end
 
                     default: begin
-                        state <= START;
+                        state <= IDLE;
                         sample <= 4'd0;
                         index <= 4'd0;
                     end

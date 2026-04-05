@@ -4,26 +4,29 @@ module uart_top_tb;
     reg clk;
     reg reset;
     reg [7:0] data_in;
-    reg write_enable;
+    reg wr_en;
     reg rdy_clr;
 
     wire rdy;
     wire busy;
     wire [7:0] data_out;
 
-    uart_top dut (
+    uart_top #(
+        .TX_DIV(16),
+        .RX_DIV(1)
+    ) dut (
         .clk(clk),
         .reset(reset),
         .data_in(data_in),
-        .write_enable(write_enable),
+        .wr_en(wr_en),
         .rdy_clr(rdy_clr),
         .rdy(rdy),
         .busy(busy),
         .data_out(data_out)
     );
 
-    // 50 MHz clock (20 ns period)
-    always #10 clk = ~clk;
+    // Fast simulation clock so complete UART frames appear quickly in the waveform.
+    always #1 clk = ~clk;
 
     task send_byte;
         input [7:0] d;
@@ -31,9 +34,9 @@ module uart_top_tb;
             @(negedge clk);
             $display("TB: send %h (tx_busy=%b) at time %0t", d, busy, $time);
             data_in = d;
-            write_enable = 1'b1;
+            wr_en = 1'b1;
             @(negedge clk);
-            write_enable = 1'b0;
+            wr_en = 1'b0;
         end
     endtask
 
@@ -66,14 +69,12 @@ module uart_top_tb;
 
     initial begin
         clk = 1'b0;
-        reset = 1'b0;
+        reset = 1'b1;
         data_in = 8'd0;
-        write_enable = 1'b0;
+        wr_en = 1'b0;
         rdy_clr = 1'b0;
 
-        // Reset
-        @(negedge clk);
-        reset = 1'b1;
+        // Hold reset active for one cycle, then release.
         @(negedge clk);
         reset = 1'b0;
 

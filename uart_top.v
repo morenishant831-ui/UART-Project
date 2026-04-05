@@ -1,10 +1,13 @@
 `timescale 1ns/1ps
 
-module uart_top (
+module uart_top #(
+    parameter integer TX_DIV = 5208,
+    parameter integer RX_DIV = 325
+) (
     input clk,
     input reset,
     input [7:0] data_in,
-    input write_enable,
+    input wr_en,
     input rdy_clr,
     output rdy,
     output busy,
@@ -25,7 +28,10 @@ module uart_top (
     // When transmitter is idle and FIFO has data, pop 1 byte and start TX.
     wire tx_start = (!tx_fifo_empty) && (tx_busy == 1'b0);
 
-    baud_rate_generator brg (
+    baud_rate_generator #(
+        .TX_DIV(TX_DIV),
+        .RX_DIV(RX_DIV)
+    ) brg (
         .clk(clk),
         .reset(reset),
         .tx_enable(tx_clock_enable),
@@ -35,7 +41,7 @@ module uart_top (
     uart_fifo tx_fifo (
         .clk(clk),
         .reset(reset),
-        .wr_en(write_enable),
+        .wr_en(wr_en),
         .wr_data(data_in),
         .full(tx_fifo_full),
         .rd_en(tx_start),

@@ -1,0 +1,211 @@
+## FIFO Depth Calculation for This UART Project
+
+### 1. What does FIFO depth mean here?
+
+In `uart_fifo.v`, the declaration
+
+```verilog
+reg [7:0] mem [0:15];
+```
+
+means:
+
+- each entry is 8 bits wide
+- there are 16 entries
+- so the TX FIFO can store **16 bytes**
+
+This depth is not chosen from baud rate alone. It is chosen from the mismatch between:
+
+- how fast data is written into the FIFO
+- how fast UART transmits data out of the FIFO
+
+---
+
+### 2. UART drain rate in this project
+
+The values below come from your code, with the math derived from them:
+
+- `TX_DIV = 5208` in `baud_rate_generator.v`
+- the testbench drives a 20 ns clock period in `uart_top_tb.v`, which is `50 MHz`
+- the sender has `START`, `DATA`, and `STOP` states in `uart_sender.v`
+- `DATA` runs for 8 bits because it exits when `index == 3'd7`
+
+So from your code, the TX frame is:
+
+- 1 start bit
+- 8 data bits
+- 1 stop bit
+
+So each byte needs **10 bit times**.
+
+Using those code values:
+
+```text
+actual baud from code = 50,000,000 / 5208
+                      ≈ 9600.61 bits/second
+
+bytes per second = 9600.61 / 10
+                 ≈ 960.06 bytes/second
+```
+
+So the transmitter removes data from the FIFO at about:
+
+- **960 bytes/second**
+- or **1 byte every 1.0416 ms**
+
+Calculation:
+
+```text
+time per byte = 10 / 9600.61
+              ≈ 0.0010416 s
+              ≈ 1.0416 ms
+```
+
+---
+
+### 3. What does a 16-byte FIFO really give you?
+
+If the FIFO is full, it can hold:
+
+```text
+16 bytes x 1.0416 ms/byte ≈ 16.67 ms
+```
+
+So you can say:
+
+**A 16-byte FIFO gives about 16.67 ms of buffering using your current clock/testbench assumptions and current TX frame format.**
+
+That means if the producer writes a burst and then stops, the UART has about 16.67 ms worth of queued data it can drain before the FIFO becomes empty.
+
+---
+
+### 4. How do you know if 16 entries is enough?
+
+The real question is:
+
+**What is the maximum burst size from the producer before the UART has time to drain it?**
+
+General rule:
+
+```text
+required FIFO depth >= bytes written during a burst - bytes transmitted during that same time
+```
+
+If the burst is very short compared to UART byte time, then almost nothing gets drained during the burst, so:
+
+```text
+required FIFO depth ≈ burst size
+```
+
+---
+
+### 5. For your current testbench
+
+In `uart_top_tb.v`, you send:
+
+- 4 back-to-back bytes
+- then later 2 back-to-back bytes
+
+So for the first burst, required depth is about 4 entries.
+
+Since your FIFO depth is 16:
+
+```text
+16 > 4
+```
+
+So it is comfortably enough for the current testbench.
+
+---
+
+### 6. Example calculations
+
+#### Case A: burst of 4 bytes
+
+If software writes 4 bytes quickly, and UART has not yet drained anything significant:
+
+```text
+required depth ≈ 4
+```
+
+Your FIFO depth = 16, so it is enough.
+
+#### Case B: burst of 12 bytes
+
+```text
+required depth ≈ 12
+```
+
+Still fits in 16.
+
+#### Case C: burst of 32 bytes
+
+```text
+required depth ≈ 32
+```
+
+Then a 16-byte FIFO is not enough. About 16 bytes would overflow unless the producer slows down or the UART drains some bytes during the burst.
+
+---
+
+### 7. Important design truth
+
+If the producer is faster than the UART **for a long time**, then no finite FIFO is enough forever.
+
+Why?
+
+Because UART TX rate is fixed by baud timing. In your current code it is about 9600.61 bps with an 8N1-style frame:
+
+- producer can be much faster
+- UART can only sustain 960 bytes/second
+
+So:
+
+- small bursts -> FIFO can absorb them
+- continuous fast stream -> FIFO eventually overflows
+
+That is why FIFO depth handles **burst mismatch**, not unlimited throughput mismatch.
+
+---
+
+### 8. Relation to your design
+
+In `uart_top.v`, transmission starts when:
+
+```verilog
+wire tx_start = (!tx_fifo_empty) && (tx_busy == 1'b0);
+```
+
+So the FIFO is drained only when:
+
+- there is data stored
+- transmitter is idle
+
+Then the sender transmits one whole UART frame before the next byte is taken.
+
+So the FIFO consumer rate is fundamentally limited by UART frame time, not by the 50 MHz system clock.
+
+---
+
+### 9. Clean interview-style answer
+
+If someone asks:
+
+**"How did you choose FIFO depth?"**
+
+You can say:
+
+"FIFO depth is chosen from the worst-case burst size and the UART drain rate. In this project, the testbench clock is 50 MHz, the TX divider is 5208, and the sender transmits one start bit, eight data bits, and one stop bit. That gives an actual transmit rate of about 960 bytes per second, or one byte every 1.04 ms. A 16-byte FIFO therefore stores about 16.67 ms of transmit backlog. That is enough for the bursts used in this project, but it would not be enough for arbitrarily large bursts or a producer that continuously writes faster than the UART line rate."
+
+---
+
+### 10. Final takeaway
+
+- Baud rate tells you **how fast FIFO is drained**
+- FIFO depth tells you **how much burst backlog you can absorb**
+- Depth is chosen from **worst-case burst requirement**
+- For your current project and testbench, **16 entries is enough**
+- For bigger bursts, you must either:
+  - increase FIFO depth
+  - add flow control
+  - or slow down the producer

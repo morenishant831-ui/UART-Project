@@ -7,6 +7,16 @@ Here, I am trying to document all the doubts, that I had with answers, as well ,
 
 ---
 
+## Resume Entry (RTL-Focused)
+
+**Project Title:** UART Transceiver RTL Design in Verilog
+
+- Designed an 8-bit UART transceiver in Verilog using modular transmitter, receiver, and baud-rate generation blocks for asynchronous serial communication.
+- Implemented clock-to-baud timing control (50 MHz system clock, 9600 bps target) with oversampling-based receive logic for stable data capture.
+- Developed a self-checking Verilog testbench to verify frame sequencing, byte-order correctness, and reset recovery across multi-byte transfers.
+
+---
+
 ## Fundamentals / Big Picture
 
 ### Q1) What problem does a UART solve?

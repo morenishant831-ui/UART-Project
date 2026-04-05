@@ -1,0 +1,67 @@
+UART simulation/debug experience
+
+Problem 1:
+The receiver code had a syntax/structure error in the DATA state of `uart_receiver.v`.
+Vivado showed the error near `default`, but the real issue was earlier in the same `case` block.
+
+What was wrong:
+- Inside the `DATA` state, there was an `end` without a matching `if (...) begin`.
+- Because of that, the parser lost track of the block structure and highlighted `default` even though `default` was not the real bug.
+
+How it was fixed:
+- I checked the `DATA` state carefully.
+- I added the missing condition:
+  `if (sample == 4'd15) begin`
+- That made the block structure valid again:
+  sample count completes -> capture one bit -> update `index` or move to `STOP`.
+- After that, the design compiled cleanly.
+
+Problem 2:
+In Vivado waveforms, `data_out` looked like it was never changing.
+
+What was actually happening:
+- The original baud settings were realistic for hardware:
+  `TX_DIV = 5208`, `RX_DIV = 325`
+- The original TB clock was `always #10 clk = ~clk;`, so the clock period was 20 ns (50 MHz).
+- With `TX_DIV = 5208`, one TX bit takes `5208 x 20 ns = 104.16 us`.
+- A full UART frame is about 10 bits, so one byte takes about `1.0416 ms`.
+- But the waveform window being viewed was only tens or hundreds of ns, so the receive event had not happened yet.
+- Also, the original testbench started with `reset = 0`, so some signals showed initial `X` values before reset was asserted.
+
+How it was fixed:
+- I parameterized `uart_top.v` so the testbench can override baud-rate divisors.
+- In `uart_top.v`, I changed the baud generator instantiation to:
+  `baud_rate_generator #(.TX_DIV(TX_DIV), .RX_DIV(RX_DIV)) brg (...)`
+- This means `uart_top` now passes its own parameter values down to the `baud_rate_generator` instance.
+- Before this change, the baud generator always used its built-in defaults:
+  `TX_DIV = 5208`, `RX_DIV = 325`
+- After this change, the testbench can instantiate `uart_top` with smaller simulation-friendly values.
+- In `uart_top_tb.v`, I used faster simulation settings:
+  `TX_DIV = 16`
+  `RX_DIV = 1`
+- I changed the TB clock to:
+  `always #1 clk = ~clk;`
+- I changed the TB reset so it starts asserted:
+  `reset = 1'b1;`
+  then release it after one cycle.
+- With the new clock, the period is 2 ns.
+- With `TX_DIV = 16`, one TX bit now takes `16 x 2 ns = 32 ns`.
+- With `RX_DIV = 1`, the receiver gets one `rx_en` pulse every clock, so RX is still running at 16x the TX bit rate in this simulation setup.
+
+Why this helped:
+- The UART transfer now completes much sooner in simulation.
+- `data_out` becomes visible in a short waveform run.
+- Starting in reset removes misleading initial `X` values on signals like `rdy` and `busy`.
+- The original values were hardware-realistic but too slow to inspect easily in a short Vivado run.
+- The new values are only for simulation speed; the default baud settings are still kept in the design.
+- In the fast-sim setup, the first received byte appears at roughly 341 ns, so it becomes visible quickly in the waveform viewer.
+
+Important Vivado note:
+- If the waveform still shows old behavior, Vivado is usually using stale compiled data or an older copied source file.
+- In that case, relaunch behavioral simulation and verify that Vivado is pointing to the files in this project folder.
+- Also make sure the simulation is run long enough and then use `Zoom Fit`, otherwise `data_out` may still look unchanged simply because the view is too narrow.
+
+Result:
+- The testbench now runs correctly.
+- Received bytes appear in order.
+- `data_out` is visible in simulation within a short time window.

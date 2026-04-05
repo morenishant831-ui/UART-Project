@@ -1,0 +1,471 @@
+## FIFO Discussion
+
+### Q: Why is `rd_data` continuously ready, but writing is not continuous?
+
+**A:** In your FIFO, `rd_data` is a continuous view of the front element because of:
+
+```verilog
+assign rd_data = mem[rd_ptr];
+```
+
+This means the byte at the current read pointer is always visible on the output. That does not remove the byte from the FIFO. It is only a peek at the front element.
+
+Writing is different because writing changes the FIFO contents. A write must happen only on a clock edge and only when a valid write request exists. That is why the design uses:
+
+```verilog
+wire do_write = wr_en && !full;
+```
+
+and then writes only inside the clocked block:
+
+```verilog
+if (do_write) begin
+    mem[wr_ptr] <= wr_data;
+    wr_ptr <= wr_ptr + 4'd1;
+end
+```
+
+So:
+
+- `rd_data` is continuously visible
+- `rd_en` consumes the visible front entry
+- `wr_en` performs a controlled state update
+
+If writing were continuous, memory would be overwritten every cycle and the FIFO would stop behaving correctly.
+
+### Q: Why does the read operation not seem to happen here?
+
+```verilog
+if (do_read) begin
+    rd_ptr <= rd_ptr + 4'd1;
+end
+```
+
+**A:** Because this FIFO is a show-ahead FIFO. The data output is not produced inside the `do_read` block. The data is already present at the output through:
+
+```verilog
+assign rd_data = mem[rd_ptr];
+```
+
+So when `do_read` becomes `1`, the FIFO is not fetching the data at that moment. It is saying:
+
+"The current front value has been accepted, so now advance to the next entry."
+
+The read is therefore split into two ideas:
+
+- `rd_data` shows the current front byte
+- `do_read` pops that byte by advancing `rd_ptr`
+
+So this line:
+
+```verilog
+rd_ptr <= rd_ptr + 4'd1;
+```
+
+is the actual consume/pop action in a show-ahead FIFO.
+
+### Q: Which style is standard?
+
+**A:** There is no single universal standard. Both FIFO styles are standard and widely used:
+
+1. Show-ahead / First-Word Fall-Through (FWFT) FIFO
+2. Registered-read / synchronous-read FIFO
+
+If someone casually says "standard FIFO," they often mean the registered-read style because it matches the idea that a read request explicitly causes output data to appear. But show-ahead FIFOs are also common, especially when low latency is useful.
+
+Your current FIFO is the show-ahead / FWFT type.
+
+### Q: What is the difference between show-ahead FIFO and registered-read FIFO?
+
+**A:** The main difference is when output data becomes visible and what `rd_en` means.
+
+Show-ahead / FWFT FIFO:
+
+```verilog
+assign rd_data = mem[rd_ptr];
+```
+
+- the front entry is always visible
+- `rd_en` means consume/pop
+- next data appears automatically after pointer advances
+
+Registered-read FIFO:
+
+```verilog
+if (do_read) begin
+    rd_data_reg <= mem[rd_ptr];
+    rd_ptr <= rd_ptr + 4'd1;
+end
+```
+
+- the output is not continuously previewed
+- `rd_en` means request/fetch
+- output timing is more explicit
+
+Timing intuition for contents `A`, `B`:
+
+Show-ahead:
+
+- before `rd_en`, `rd_data = A`
+- on read edge, consumer accepts `A`
+- pointer advances
+- after that, `rd_data = B`
+
+Registered-read:
+
+- before `rd_en`, output may be old or invalid
+- on read edge, `A` is loaded into output register
+- then output becomes `A`
+- a later read moves to the next item
+
+Clean mental model:
+
+- show-ahead: data is already there, `rd_en` pops it
+- registered-read: `rd_en` asks the FIFO to produce it
+
+### Q: Which style fits this UART TX path better?
+
+**A:** Show-ahead is a good fit here. In `uart_top.v`, the transmitter starts when the FIFO is not empty and TX is idle:
+
+```verilog
+wire tx_start = (!tx_fifo_empty) && (tx_busy == 1'b0);
+```
+
+Because the FIFO output is already showing the front byte, the transmitter can immediately use that byte when `tx_start` happens. That keeps the control simple.
+
+If you had used a registered-read FIFO instead, you would likely need an extra cycle:
+
+1. issue FIFO read
+2. wait for output data to become valid
+3. then start the transmitter
+
+### Q: How do I know `reg [7:0] mem [0:15];` is enough for the baud rate?
+
+**A:** That declaration means the FIFO can hold 16 bytes. Whether 16 is enough is not decided by baud rate alone. It depends on:
+
+- how fast bytes are written into the FIFO
+- how fast UART removes them
+- how large the worst-case burst is
+
+From your code:
+
+- FIFO depth = 16 entries
+- testbench clock = 50 MHz
+- `TX_DIV = 5208`
+- sender uses 1 start bit, 8 data bits, and 1 stop bit
+
+So the UART drains data much more slowly than the 50 MHz write side can provide it.
+
+That is why the practical question is:
+
+"What is the largest burst of bytes that may arrive before UART has time to drain them?"
+
+For your current testbench, the burst sizes are small enough that 16 entries is enough.
+
+### Q: If the whole design uses one 50 MHz clock, why does FIFO still make sense? Isn't FIFO mainly for different read and write clocks?
+
+**A:** FIFO is often used for different clock domains, but that is not the only reason to use it.
+
+Your UART FIFO is a single-clock FIFO, because both write-side and read-side logic run from the same `clk`.
+
+But FIFO still makes sense because there is a rate mismatch, even though there is not a clock mismatch.
+
+In your design:
+
+- writes can happen on ordinary system-clock cycles
+- reads happen only when the transmitter is ready to start a new frame
+
+The write side can potentially provide data much faster than the UART line can transmit it.
+
+So even with one 50 MHz clock:
+
+- producer side is effectively fast
+- UART consumer side is effectively slow
+
+Why?
+
+Because the FIFO pops one byte only when:
+
+```verilog
+wire tx_start = (!tx_fifo_empty) && (tx_busy == 1'b0);
+```
+
+Then the transmitter spends a whole UART frame sending that byte.
+
+So the important difference is:
+
+- dual-clock FIFO: used when read and write clocks are different
+- single-clock FIFO: used when clocks are the same, but producer and consumer operate at different effective data rates or burst patterns
+
+Your UART FIFO is the second case.
+
+Without FIFO:
+
+- the user must wait until `busy == 0` before giving every byte
+
+With FIFO:
+
+- the user can write a burst quickly
+- UART transmits those bytes slowly in the background
+
+So the FIFO here solves a rate mismatch, not a clock-domain crossing problem.
+
+### Q: You said "FIFO pops one byte only when transmitter is idle", but in my design I only see `rd_ptr <= rd_ptr + 1`. How is that a pop?
+
+**A:** In your FIFO, "pop" does not mean "copy data out inside the `if (do_read)` block." Your FIFO is a show-ahead FIFO, so the front byte is already visible all the time:
+
+```verilog
+assign rd_data = mem[rd_ptr];
+```
+
+So the current front entry is already sitting on `rd_data` before `rd_en` happens.
+
+Then when `do_read` is true:
+
+```verilog
+if (do_read) begin
+    rd_ptr <= rd_ptr + 4'd1;
+end
+```
+
+the FIFO is saying:
+
+"The consumer has accepted the current front byte. Move the front pointer to the next item."
+
+That pointer advance is the pop operation in a show-ahead FIFO.
+
+In your top-level design, this happens together with the transmitter start signal:
+
+```verilog
+wire tx_start = (!tx_fifo_empty) && (tx_busy == 1'b0);
+```
+
+That same `tx_start` is connected to:
+
+- FIFO `rd_en`
+- sender `wr_en`
+
+So on that clock edge:
+
+1. the sender latches the current `tx_fifo_dout`
+2. the FIFO advances `rd_ptr`
+3. `count` is decremented
+
+So the byte is not lost. It is consumed by the sender and then removed from the FIFO.
+
+### Q: If I write `rdaddr <= rdaddr + 1'b1;`, is that wrong? Or should I use a width-matched constant?
+
+**A:** For this kind of pointer increment, `rdaddr <= rdaddr + 1'b1;` is generally not wrong.
+
+Why it works:
+
+- `rdaddr` has a fixed width
+- the literal `1'b1` is extended to match the arithmetic width
+- so this behaves like adding 1 to the pointer
+
+In your current FIFO, the equivalent style is:
+
+```verilog
+rd_ptr <= rd_ptr + 4'd1;
+```
+
+That is also correct, and it is a little more explicit because the width matches the pointer width directly.
+
+Practical guidance:
+
+- fixed width pointer: `+ 4'd1` is very clean
+- parameterized pointer: `+ 1'b1` is usually fine
+- if you want maximum explicitness in parameterized RTL, use a width-matched constant
+
+Example width-matched constant for pointer width `AW`:
+
+```verilog
+{{(AW-1){1'b0}}, 1'b1}
+```
+
+### Q: Will the pointer wrap correctly if I do `+ 1'b1` or `+ 4'd1`?
+
+**A:** Yes, for your current FIFO it will.
+
+Your FIFO depth is 16 and your pointer is 4 bits wide, so natural binary overflow wraps correctly:
+
+```verilog
+4'b1111 + 1 -> 4'b0000
+```
+
+That is exactly what you want for a circular FIFO pointer. This works cleanly because your FIFO depth is a power of two.
+
+### Q: What does "one clock cycle delay between two successive reads and writes" mean in FIFO depth calculation?
+
+**A:** This phrase is often written badly.
+
+There are two different interpretations:
+
+1. Normal clocked operation
+2. A real extra idle cycle
+
+Normal clocked operation means:
+
+- one operation on one clock edge
+- the next operation on the next clock edge
+
+That is not an added penalty. That is just how synchronous logic works.
+
+A real extra idle cycle means:
+
+- do one write or read
+- skip the next eligible edge
+- do the next write or read after that
+
+That really halves the effective rate.
+
+So if the problem statement only means normal clock-to-clock spacing, you do not add any extra slowdown. If it means a forced skipped cycle, then you must recompute the effective rates.
+
+### Q: In simple language, what does that statement mean?
+
+**A:** In simple language it usually means:
+
+"After one read or write happens, the next one can happen on the next clock edge."
+
+That is normal clocked behavior. It does not automatically mean:
+
+"One read or write happens only every two cycles."
+
+So you should not halve the frequency unless the problem explicitly says a cycle is skipped.
+
+### Q: Then why does some material say Case 2 is the same as Case 1?
+
+**A:** Because the author is treating "one clock cycle delay" as normal clock spacing, not as an added stall.
+
+So the frequency already tells you the operation spacing:
+
+- frequency `f` means one opportunity every `1/f`
+
+If no extra stall is inserted, the write/read counts do not change, so the FIFO depth answer stays the same.
+
+### Q: So I should not say one read or write happens in 2 cycles?
+
+**A:** Correct. Do not say that unless the problem clearly says there is an extra skipped cycle or idle bubble after each operation.
+
+Normal case:
+
+- one operation every clock cycle
+
+Extra-delay case:
+
+- one operation every two clock cycles
+
+Those are different systems.
+
+### Q: What is frequency? If it says writing frequency is 50 MHz, what does that tell me?
+
+**A:** It tells you the write clock ticks 50 million times per second.
+
+That means:
+
+- write clock frequency = 50 MHz
+- write clock period = `1 / 50 MHz = 20 ns`
+
+So the write side gets one write opportunity every 20 ns.
+
+It does not automatically mean a write definitely happens on every cycle. It means the circuit gets that many chances to write.
+
+### Q: So if the circuit wants, can it write 50 million times per second?
+
+**A:** At most, yes, if:
+
+- the write clock is 50 MHz
+- the design allows one write per cycle
+- `wr_en` is asserted on every cycle
+- the FIFO is not full
+
+But actual writes may be fewer than that, depending on control and FIFO status.
+
+FIFO depth does not set the write frequency. It sets how much data can be stored before the FIFO becomes full.
+
+### Q: Is `wr_en` in an asynchronous FIFO the same kind of enable? And why do we write only on `wr_en && !full`?
+
+**A:** Yes. `wr_en` is the write request signal.
+
+It means:
+
+"The producer wants to write data now."
+
+But the write should happen only if there is space in the FIFO. That is why the usual rule is:
+
+```verilog
+if (wr_en && !full) begin
+    // perform write
+end
+```
+
+Meaning:
+
+- `wr_en = 1` says a write is requested
+- `full = 0` says space is available
+- only then is the write valid
+
+That same idea is used in both synchronous and asynchronous FIFOs.
+
+### Q: In async FIFO code, if I see `wrptrbin_next = wrptrbin;` and then later a condition changes it, am I still incrementing resources unnecessarily?
+
+**A:** Not in the way it looks in software.
+
+Code like this:
+
+```verilog
+wrptrbin_next = wrptrbin;
+if (wren && !full)
+    wrptrbin_next = wrptrbin + 1;
+```
+
+means:
+
+- by default, hold the current pointer
+- if a valid write happens, increment it
+
+The synthesizer typically turns that into:
+
+- one adder for `wrptrbin + 1`
+- one mux choosing between `wrptrbin` and `wrptrbin + 1`
+- simple logic for `wren && !full`
+
+So yes, a little logic is used, but that is normal and necessary. It does not mean the code is wasteful just because you assigned the same signal twice in the source.
+
+### Q: If the pointer assignment is outside the `if`, isn't it incrementing first and then checking whether to write?
+
+**A:** No. Two things matter here:
+
+1. `wrptrbin_next` itself usually already includes the condition `wren && !full`
+2. nonblocking assignments (`<=`) in a clocked block do not work like software statements
+
+In a clocked block, all right-hand sides are evaluated using the old values, and all left-hand side updates happen together at the end of the clock event.
+
+So code like this:
+
+```verilog
+wrptrbin <= wrptrbin_next;
+if (wren && !full)
+    mem[wrptrbin[AW-1:0]] <= din;
+```
+
+means:
+
+- memory write uses the current pointer
+- pointer register updates to the next value after the edge
+
+That is exactly what you want:
+
+- write data into the current location
+- then move the pointer for the next cycle
+
+### Q: So pointer should increment only if I am writing, right?
+
+**A:** Yes. That is correct.
+
+And that is exactly what the next-state style does, but indirectly:
+
+- if `wren && !full` is true, `wrptrbin_next = wrptrbin + 1`
+- otherwise, `wrptrbin_next = wrptrbin`
+
+So the register update may appear outside the `if`, but the condition is already built into the value of `wrptrbin_next`.
